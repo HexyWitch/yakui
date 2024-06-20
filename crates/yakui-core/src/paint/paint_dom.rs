@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use {
+    crate::paint::{PaintCallType, UserPaintCallId},
+    std::collections::HashMap,
+};
 
 use glam::Vec2;
 use thunderdome::Arena;
@@ -175,30 +178,44 @@ impl PaintDom {
             .expect("an active layer is required to call add_mesh");
 
         let current_clip = self.clip_stack.last().copied();
-        let call = match layer.calls.last_mut() {
-            Some(call)
-                if call.texture == texture_id
-                    && call.pipeline == mesh.pipeline
-                    && call.clip == current_clip =>
-            {
-                call
+        match layer.calls.last_mut() {
+            Some(PaintCall {
+                call:
+                    PaintCallType::Internal {
+                        texture, pipeline, ..
+                    },
+                clip,
+            }) if *texture == texture_id && *pipeline == mesh.pipeline && *clip == current_clip => {
             }
             _ => {
-                let mut call = PaintCall::new();
-                call.texture = texture_id;
-                call.pipeline = mesh.pipeline;
-                call.clip = current_clip;
+                let call = PaintCall {
+                    call: PaintCallType::Internal {
+                        vertices: Vec::new(),
+                        indices: Vec::new(),
+                        texture: texture_id,
+                        pipeline: mesh.pipeline,
+                    },
+                    clip: current_clip,
+                };
 
                 layer.calls.push(call);
-                layer.calls.last_mut().unwrap()
             }
+        };
+
+        let PaintCallType::Internal {
+            vertices: call_vertices,
+            indices: call_indices,
+            ..
+        } = &mut layer.calls.last_mut().unwrap().call
+        else {
+            unreachable!();
         };
 
         let indices = mesh
             .indices
             .into_iter()
-            .map(|index| index + call.vertices.len() as u16);
-        call.indices.extend(indices);
+            .map(|index| index + call_vertices.len() as u16);
+        call_indices.extend(indices);
 
         let vertices = mesh.vertices.into_iter().map(|mut vertex| {
             let mut pos = vertex.position * self.scale_factor;
@@ -218,7 +235,23 @@ impl PaintDom {
             vertex.position = pos;
             vertex
         });
-        call.vertices.extend(vertices);
+        call_vertices.extend(vertices);
+    }
+
+    /// Adds a user-managed paint call to be painted
+    /// This expects the user to handle the paint call in their own renderer
+    pub fn add_user_call(&mut self, call_id: UserPaintCallId) {
+        profiling::scope!("PaintDom::add_user_call");
+
+        let layer = self
+            .layers
+            .current_mut()
+            .expect("an active layer is required to call add_user_call");
+
+        layer.calls.push(PaintCall {
+            call: PaintCallType::User(call_id),
+            clip: self.clip_stack.last().copied(),
+        });
     }
 
     /// Use the given region as the clipping rect for all following paint calls.

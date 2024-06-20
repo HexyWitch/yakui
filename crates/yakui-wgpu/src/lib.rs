@@ -5,10 +5,10 @@ mod pipeline_cache;
 mod samplers;
 mod texture;
 
-use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::Range;
 use std::sync::Arc;
+use {std::collections::HashMap, yakui_core::paint::PaintCallType};
 
 use buffer::Buffer;
 use bytemuck::{Pod, Zeroable};
@@ -296,15 +296,26 @@ impl YakuiWgpu {
             .layers()
             .iter()
             .flat_map(|layer| &layer.calls)
-            .map(|call| {
-                let vertices = call.vertices.iter().map(|vertex| Vertex {
+            .filter_map(|call| {
+                let (vertices, indices, texture, pipeline) = if let PaintCallType::Internal {
+                    vertices,
+                    indices,
+                    texture,
+                    pipeline,
+                } = &call.call
+                {
+                    (vertices, indices, texture, pipeline)
+                } else {
+                    return None;
+                };
+                let vertices = vertices.iter().map(|vertex| Vertex {
                     pos: vertex.position,
                     texcoord: vertex.texcoord,
                     color: vertex.color,
                 });
 
                 let base = self.vertices.len() as u32;
-                let indices = call.indices.iter().map(|&index| base + index as u32);
+                let indices = indices.iter().map(|&index| base + index as u32);
 
                 let start = self.indices.len() as u32;
                 let end = start + indices.len() as u32;
@@ -312,8 +323,7 @@ impl YakuiWgpu {
                 self.vertices.extend(vertices);
                 self.indices.extend(indices);
 
-                let (view, min_filter, mag_filter, mipmap_filter) = call
-                    .texture
+                let (view, min_filter, mag_filter, mipmap_filter) = texture
                     .and_then(|id| match id {
                         TextureId::Managed(managed) => {
                             let texture = self.managed_textures.get(&managed)?;
@@ -359,12 +369,12 @@ impl YakuiWgpu {
                     ],
                 });
 
-                DrawCommand {
+                Some(DrawCommand {
                     index_range: start..end,
                     bind_group,
-                    pipeline: call.pipeline,
+                    pipeline: *pipeline,
                     clip: call.clip,
-                }
+                })
             });
 
         self.commands.extend(commands);

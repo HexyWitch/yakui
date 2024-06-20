@@ -33,10 +33,7 @@ where
 #[non_exhaustive]
 #[allow(missing_docs)]
 pub struct PaintCall {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u16>,
-    pub texture: Option<TextureId>,
-    pub pipeline: Pipeline,
+    pub call: PaintCallType,
     pub clip: Option<Rect>,
 }
 
@@ -44,13 +41,30 @@ impl PaintCall {
     /// Create a new empty `PaintCall`.
     pub fn new() -> Self {
         Self {
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            texture: None,
-            pipeline: Pipeline::Main,
+            call: PaintCallType::Internal {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+                texture: None,
+                pipeline: Pipeline::Main,
+            },
             clip: None,
         }
     }
+}
+
+/// A user-managed ID for an externally managed paint call
+pub type UserPaintCallId = u64;
+
+#[derive(Debug)]
+#[allow(missing_docs)]
+pub enum PaintCallType {
+    Internal {
+        vertices: Vec<Vertex>,
+        indices: Vec<u16>,
+        texture: Option<TextureId>,
+        pipeline: Pipeline,
+    },
+    User(UserPaintCallId),
 }
 
 #[derive(Debug, Clone, Copy)]

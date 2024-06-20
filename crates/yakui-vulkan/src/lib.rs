@@ -25,7 +25,6 @@ mod vulkan_texture;
 
 use ash::util::read_spv;
 pub use ash::vk;
-use buffer::Buffer;
 use bytemuck::{bytes_of, Pod, Zeroable};
 pub use descriptors::Descriptors;
 use std::{collections::HashMap, ffi::CStr, io::Cursor};
@@ -34,6 +33,7 @@ use vulkan_texture::{UploadQueue, NO_TEXTURE_ID};
 pub use vulkan_texture::{VulkanTexture, VulkanTextureCreateInfo};
 use yakui::geometry::UVec2;
 use yakui::{paint::Vertex as YakuiVertex, ManagedTextureId};
+use {buffer::Buffer, yakui::paint::UserPaintCallId};
 
 /// A struct wrapping everything needed to render yakui on Vulkan. This will be your main entry point.
 ///
@@ -76,14 +76,21 @@ pub struct Options {
     pub subpass: u32,
 }
 
+struct DrawCall {
+    call: DrawCallType,
+    clip: Option<yakui::geometry::Rect>,
+}
+
 #[derive(Clone, Copy, Debug)]
 /// A single draw call to render a yakui mesh
-struct DrawCall {
-    index_offset: u32,
-    index_count: u32,
-    clip: Option<yakui::geometry::Rect>,
-    texture_id: u32,
-    workflow: Workflow,
+enum DrawCallType {
+    Internal {
+        index_offset: u32,
+        index_count: u32,
+        texture_id: u32,
+        workflow: Workflow,
+    },
+    User(UserPaintCallId),
 }
 
 #[repr(C)]
@@ -408,51 +415,71 @@ impl YakuiVulkan {
 
         let draw_calls = self.build_draw_calls(vulkan_context, paint);
 
-        self.render(vulkan_context, resolution, cmd, &draw_calls);
+        self.render(vulkan_context, resolution, cmd, &draw_calls, |_, _, _| {
+            false
+        });
+    }
+
+    /// Paint the specified paint calls using the provided [`VulkanContext`]
+    /// The provided closure will be called with the [`VulkanContext`] and the `vk::CommandBuffer`
+    /// to allow the user to record additional draw calls.
+    ///
+    /// ## Safety
+    /// - `vulkan_context` must be the same as the one used to create this [`YakuiVulkan`] instance
+    /// - `cmd` must be in rendering state, with viewport and scissor dynamic states set.
+    pub unsafe fn paint_with_user_calls(
+        &mut self,
+        paint: &yakui_core::paint::PaintDom,
+        vulkan_context: &VulkanContext,
+        cmd: vk::CommandBuffer,
+        resolution: vk::Extent2D,
+        mut user_call_cb: impl FnMut(&VulkanContext, vk::CommandBuffer, UserPaintCallId),
+    ) {
+        // If there's nothing to paint, well.. don't paint!
+        let layers = paint.layers();
+        if layers.iter().all(|layer| layer.calls.is_empty()) {
+            return;
+        }
+
+        let draw_calls = self.build_draw_calls(vulkan_context, paint);
+        self.render(
+            vulkan_context,
+            resolution,
+            cmd,
+            &draw_calls,
+            move |context, cmd, id| {
+                user_call_cb(context, cmd, id);
+                true
+            },
+        );
     }
 
     /// Render the draw calls we've built up
+    ///
+    /// The provided closure will be called on any user-managed draw calls. The callback should
+    /// return `true` if the pipeline should be re-bound after the user call.
     fn render(
         &self,
         vulkan_context: &VulkanContext,
         resolution: vk::Extent2D,
         command_buffer: vk::CommandBuffer,
         draw_calls: &[DrawCall],
+        mut user_call_cb: impl FnMut(&VulkanContext, vk::CommandBuffer, UserPaintCallId) -> bool,
     ) {
         let device = vulkan_context.device;
 
         let surface_size = UVec2::new(resolution.width, resolution.height);
+        let default_scissor = [resolution.into()];
 
+        let mut rebind_pipeline = true;
         unsafe {
-            device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.graphics_pipeline,
-            );
-            let default_scissor = [resolution.into()];
-
-            device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.vertex_buffer.handle], &[0]);
-            device.cmd_bind_index_buffer(
-                command_buffer,
-                self.index_buffer.handle,
-                0,
-                vk::IndexType::UINT32,
-            );
-            device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                std::slice::from_ref(&self.descriptors.set),
-                &[],
-            );
-            let mut last_clip = None;
-            for draw_call in draw_calls {
-                if draw_call.clip != last_clip {
-                    last_clip = draw_call.clip;
+            let mut last_clip: Option<yakui::geometry::Rect> = None;
+            let mut set_scissor = |clip| {
+                if clip != last_clip {
+                    last_clip = clip;
 
                     // TODO - do this when processing draw calls
-                    match draw_call.clip {
+                    match clip {
                         Some(rect) => {
                             let pos = rect.pos().as_uvec2();
                             let size = rect.size().as_uvec2();
@@ -470,7 +497,7 @@ impl YakuiVulkan {
                                 || size.x == 0
                                 || size.y == 0
                             {
-                                continue;
+                                return;
                             }
 
                             let scissors = [vk::Rect2D {
@@ -489,26 +516,66 @@ impl YakuiVulkan {
                         }
                     }
                 }
+            };
 
-                // Instead of using different pipelines for text and non-text rendering, we just
-                // pass the "workflow" down through a push constant and branch in the shader.
-                device.cmd_push_constants(
-                    command_buffer,
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    bytes_of(&PushConstant::new(draw_call.texture_id, draw_call.workflow)),
-                );
+            for draw_call in draw_calls {
+                match draw_call.call {
+                    DrawCallType::Internal {
+                        index_offset,
+                        index_count,
+                        texture_id,
+                        workflow,
+                    } => {
+                        if rebind_pipeline {
+                            device.cmd_bind_pipeline(
+                                command_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                self.graphics_pipeline,
+                            );
 
-                // Draw the mesh with the indexes we were provided
-                device.cmd_draw_indexed(
-                    command_buffer,
-                    draw_call.index_count,
-                    1,
-                    draw_call.index_offset,
-                    0,
-                    1,
-                );
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                0,
+                                &[self.vertex_buffer.handle],
+                                &[0],
+                            );
+                            device.cmd_bind_index_buffer(
+                                command_buffer,
+                                self.index_buffer.handle,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            device.cmd_bind_descriptor_sets(
+                                command_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                self.pipeline_layout,
+                                0,
+                                std::slice::from_ref(&self.descriptors.set),
+                                &[],
+                            );
+
+                            rebind_pipeline = false;
+                        }
+                        set_scissor(draw_call.clip);
+
+                        // Instead of using different pipelines for text and non-text rendering, we just
+                        // pass the "workflow" down through a push constant and branch in the shader.
+                        device.cmd_push_constants(
+                            command_buffer,
+                            self.pipeline_layout,
+                            vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytes_of(&PushConstant::new(texture_id, workflow)),
+                        );
+
+                        // Draw the mesh with the indexes we were provided
+                        device.cmd_draw_indexed(command_buffer, index_count, 1, index_offset, 0, 1);
+                    }
+                    DrawCallType::User(id) => {
+                        set_scissor(draw_call.clip);
+                        rebind_pipeline = user_call_cb(vulkan_context, command_buffer, id);
+                    }
+                }
             }
         }
     }
@@ -628,7 +695,7 @@ impl YakuiVulkan {
         }
     }
 
-    fn build_draw_calls(
+    fn build_draw_calls<'a>(
         &mut self,
         vulkan_context: &VulkanContext,
         paint: &yakui::paint::PaintDom,
@@ -640,40 +707,56 @@ impl YakuiVulkan {
         let calls = paint.layers().iter().flat_map(|layer| &layer.calls);
 
         for call in calls {
-            let base = vertices.len() as u32;
-            let index_offset = indices.len() as u32;
-            let index_count = call.indices.len() as u32;
+            match &call.call {
+                yakui::paint::PaintCallType::Internal {
+                    vertices: call_vertices,
+                    indices: call_indices,
+                    texture,
+                    pipeline,
+                } => {
+                    let base = vertices.len() as u32;
+                    let index_offset = indices.len() as u32;
+                    let index_count = call_indices.len() as u32;
 
-            for index in &call.indices {
-                indices.push(*index as u32 + base);
-            }
-            for vertex in &call.vertices {
-                vertices.push(vertex.into())
-            }
-
-            let texture_id = call
-                .texture
-                .and_then(|id| match id {
-                    yakui::TextureId::Managed(managed) => {
-                        let texture = self.yakui_managed_textures.get(&managed)?;
-                        Some(texture.id)
+                    for index in call_indices {
+                        indices.push(*index as u32 + base);
                     }
-                    yakui::TextureId::User(bits) => {
-                        let texture = self
-                            .user_textures
-                            .get(thunderdome::Index::from_bits(bits)?)?;
-                        Some(texture.id)
+                    for vertex in call_vertices {
+                        vertices.push(vertex.into())
                     }
-                })
-                .unwrap_or(NO_TEXTURE_ID);
 
-            draw_calls.push(DrawCall {
-                index_offset,
-                index_count,
-                clip: call.clip,
-                texture_id,
-                workflow: call.pipeline.into(),
-            });
+                    let texture_id = texture
+                        .and_then(|id| match id {
+                            yakui::TextureId::Managed(managed) => {
+                                let texture = self.yakui_managed_textures.get(&managed)?;
+                                Some(texture.id)
+                            }
+                            yakui::TextureId::User(bits) => {
+                                let texture = self
+                                    .user_textures
+                                    .get(thunderdome::Index::from_bits(bits)?)?;
+                                Some(texture.id)
+                            }
+                        })
+                        .unwrap_or(NO_TEXTURE_ID);
+
+                    draw_calls.push(DrawCall {
+                        call: DrawCallType::Internal {
+                            index_offset,
+                            index_count,
+                            texture_id,
+                            workflow: (*pipeline).into(),
+                        },
+                        clip: call.clip,
+                    });
+                }
+                yakui::paint::PaintCallType::User(id) => {
+                    draw_calls.push(DrawCall {
+                        call: DrawCallType::User(*id),
+                        clip: call.clip,
+                    });
+                }
+            }
         }
 
         unsafe {
