@@ -133,12 +133,14 @@ impl YakuiWgpu {
         min_filter: wgpu::FilterMode,
         mag_filter: wgpu::FilterMode,
         mipmap_filter: wgpu::FilterMode,
+        address_mode: wgpu::AddressMode,
     ) -> TextureId {
         let index = self.textures.insert(GpuTexture {
             view: view.into(),
             min_filter,
             mag_filter,
             mipmap_filter,
+            address_mode,
         });
         TextureId::User(index.to_bits())
     }
@@ -323,7 +325,7 @@ impl YakuiWgpu {
                 self.vertices.extend(vertices);
                 self.indices.extend(indices);
 
-                let (view, min_filter, mag_filter, mipmap_filter) = texture
+                let (view, min_filter, mag_filter, mipmap_filter, address_mode) = texture
                     .and_then(|id| match id {
                         TextureId::Managed(managed) => {
                             let texture = self.managed_textures.get(&managed)?;
@@ -332,6 +334,7 @@ impl YakuiWgpu {
                                 texture.min_filter,
                                 texture.mag_filter,
                                 wgpu::FilterMode::Nearest,
+                                texture.address_mode,
                             ))
                         }
                         TextureId::User(bits) => {
@@ -342,6 +345,7 @@ impl YakuiWgpu {
                                 texture.min_filter,
                                 texture.mag_filter,
                                 texture.mipmap_filter,
+                                texture.address_mode,
                             ))
                         }
                     })
@@ -350,9 +354,12 @@ impl YakuiWgpu {
                         self.default_texture.min_filter,
                         self.default_texture.mag_filter,
                         wgpu::FilterMode::Nearest,
+                        self.default_texture.address_mode,
                     ));
 
-                let sampler = self.samplers.get(min_filter, mag_filter, mipmap_filter);
+                let sampler =
+                    self.samplers
+                        .get(min_filter, mag_filter, mipmap_filter, address_mode);
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("yakui Bind Group"),
