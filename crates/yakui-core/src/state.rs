@@ -1,4 +1,3 @@
-use crate::context;
 use crate::dom::Dom;
 use crate::event::{Event, EventResponse};
 use crate::geometry::{Rect, Vec2};
@@ -6,6 +5,7 @@ use crate::id::ManagedTextureId;
 use crate::input::InputState;
 use crate::layout::LayoutDom;
 use crate::paint::{PaintDom, Texture};
+use crate::{context, id::WidgetId};
 
 /// The entrypoint for yakui.
 #[derive(Debug)]
@@ -43,6 +43,11 @@ impl Yakui {
 
         context::unbind_dom();
         response == EventResponse::Sink
+    }
+
+    /// Requests focus for a widget
+    pub fn request_focus(&mut self, widget_id: Option<WidgetId>) {
+        self.handle_event(Event::RequestFocus(widget_id));
     }
 
     /// Creates a texture for use within yakui.
@@ -97,7 +102,7 @@ impl Yakui {
     pub fn finish(&mut self) {
         context::unbind_dom();
 
-        self.dom.finish(&self.input);
+        self.dom.finish();
         self.layout.sync_removals(&self.dom.removed_nodes());
         self.layout.calculate_all(&self.dom, &self.input);
         self.input.finish();

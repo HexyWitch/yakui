@@ -168,6 +168,11 @@ impl InputState {
             Event::KeyChanged { key, down } => self.keyboard_key_changed(dom, layout, *key, *down),
             Event::ModifiersChanged(modifiers) => self.modifiers_changed(modifiers),
             Event::TextInput(c) => self.text_input(dom, layout, *c),
+            Event::RequestFocus(id) => {
+                self.set_selection(*id);
+                self.notify_selection(dom, layout);
+                EventResponse::Bubble
+            }
             _ => EventResponse::Bubble,
         }
     }

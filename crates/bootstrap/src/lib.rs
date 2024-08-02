@@ -1,7 +1,7 @@
 mod custom_texture;
 
-use std::fmt::Write;
 use std::time::Instant;
+use {std::fmt::Write, yakui::WidgetId};
 
 use winit::{
     application::ApplicationHandler,
@@ -38,6 +38,9 @@ pub struct ExampleState {
     /// the renderer. This image is generated in `custom_texture.rs` and
     /// uploaded with wgpu directly.
     pub custom: Option<TextureId>,
+
+    /// Lets an example request that a widget be focused
+    pub request_focus: Option<WidgetId>,
 }
 
 struct App<T: ExampleBody> {
@@ -135,6 +138,10 @@ impl<T: ExampleBody> ApplicationHandler for App<T> {
                     // Call out to the body of the program, passing in a bit of
                     // shared state that all the examples can use.
                     self.body.run(&mut self.state);
+
+                    if let Some(widget_id) = self.state.request_focus.take() {
+                        self.yak.request_focus(Some(widget_id));
+                    }
 
                     // Finish building the UI and compute this frame's layout.
                     self.yak.finish();
@@ -251,6 +258,7 @@ fn run(body: impl ExampleBody) {
             monkey_blurred,
             brown_inlay,
             custom: None,
+            request_focus: None,
         },
         window: None,
         app: None,
