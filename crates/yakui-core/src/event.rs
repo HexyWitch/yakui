@@ -4,6 +4,7 @@ use glam::Vec2;
 
 use crate::geometry::Rect;
 use crate::input::{KeyCode, Modifiers, MouseButton};
+use crate::WidgetId;
 
 /// An event that can be handled by yakui.
 #[derive(Debug)]
@@ -45,6 +46,9 @@ pub enum Event {
 
     /// A Unicode codepoint was typed in the window.
     TextInput(char),
+
+    /// A request to focus a widget was made
+    RequestFocus(Option<WidgetId>),
 }
 
 /// An event that can be handled by an individual widget.
